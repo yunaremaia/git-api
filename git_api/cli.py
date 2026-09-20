@@ -54,7 +54,15 @@ def save_request(name: str, method: str, url: str, headers: dict,
                  response_headers: dict, response_body: str):
     """Persist request + response as a clean JSON file."""
     req_dir = GAPI_DIR / "requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    # Sanitize filename: keep alphanumeric, dash, underscore; replace others with _
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    # Ensure the filename is not empty and not just dots/underscores
+    if not safe_name or safe_name.strip("._") == "":
+        safe_name = "request_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    # Limit length to avoid filesystem issues
+    if len(safe_name) > 200:
+        safe_name = safe_name[:200]
     out = {
         "name": name,
         "request": {
@@ -208,6 +216,7 @@ def main():
                         print(f"  {k} = {v}")
         elif cmd == "LIST":
             req_dir = GAPI_DIR / "requests"
+            req_dir.mkdir(parents=True, exist_ok=True)
             files = sorted(req_dir.glob("*.json"))
             if not files:
                 print("No saved requests. Use 'save NAME' to save one.")
@@ -275,7 +284,7 @@ def main():
             name = parts[1]
             method, url, headers, body, status, resp_hdrs, resp_body = last_request
             save_request(name, method, url, headers, body, status,
-                         resp_hdrs, resp_body.decode(errors="replace"))
+                         resp_hdrs, resp_body.decode(errors="replace") if isinstance(resp_body, bytes) else resp_body)
         elif cmd in ("GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"):
             if len(parts) < 2:
                 print(f"Usage: {cmd} <url> [body]")
