@@ -1,5 +1,7 @@
 # Git-API — Git-native API REPL
 
+[![CI](https://github.com/yunaremaia/git-api/actions/workflows/ci.yml/badge.svg)](https://github.com/yunaremaia/git-api/actions/workflows/ci.yml)
+
 A local-first API REPL that persists requests as clean JSON files in your repo.
 
 ## Why
