@@ -14,10 +14,15 @@ GAPI_DIR = pathlib.Path(".git-api")
 CONFIG_FILE = GAPI_DIR / "config.json"
 HISTORY_FILE = GAPI_DIR / "history.txt"
 
-# In-memory readline buffer size. Deliberately far larger than `history_size`:
-# set_history_length() caps what write_history_file() serialises, so using the
-# same number for both would truncate history.txt to a moving window.
-MEMORY_HISTORY_SIZE = 10_000
+# In-memory readline buffer. `history_size` from the config bounds this; it is
+# what `!!`, `!N` and `history` can reach. It is deliberately NOT the disk cap:
+# write_history_file() serialises the capped in-memory buffer, so using the
+# same number for both truncated history.txt to a moving N-line window.
+MEMORY_HISTORY_DEFAULT = 100
+
+# How many lines history.txt keeps on disk. Separate from the in-memory cap
+# because the two are different limits: recall depth and retention.
+HISTORY_FILE_MAX_LINES = 10_000
 
 
 def init():
@@ -41,6 +46,30 @@ def init():
 
 def load_config() -> dict:
     return json.loads(CONFIG_FILE.read_text())
+
+
+def append_history(line: str) -> None:
+    """Append *line* to ``history.txt``, trimming to ``HISTORY_FILE_MAX_LINES``.
+
+    ``readline.write_history_file()`` cannot be used here: it serialises the
+    in-memory buffer, which ``set_history_length()`` has already capped, so on
+    every command it rewrote the file with only the most recent entries. The
+    buffer cap and the file cap are different limits -- recall depth versus
+    retention -- so the file is written directly.
+
+    The file is only rewritten when it grows past the cap, so the common case
+    is a single append.
+    """
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = HISTORY_FILE.read_text().splitlines() if HISTORY_FILE.exists() \
+        else []
+    existing.append(line)
+    if len(existing) > HISTORY_FILE_MAX_LINES:
+        existing = existing[-HISTORY_FILE_MAX_LINES:]
+        HISTORY_FILE.write_text("\n".join(existing) + "\n")
+    else:
+        with HISTORY_FILE.open("a") as fh:
+            fh.write(line + "\n")
 
 
 def get_env(config: dict) -> dict:
@@ -206,7 +235,11 @@ def main():
     print("🌿  Git-API REPL 0.1.0")
     print("    Type 'help' for commands, 'quit' to exit.\n")
 
-    readline.set_history_length(config.get("history_size", 100))
+    # `history_size` bounds the in-memory buffer only. It is not the disk cap:
+    # write_history_file() serialises the capped buffer, so using it for both
+    # rewrote history.txt with only the last N commands, on every command.
+    readline.set_history_length(config.get("history_size",
+                                          MEMORY_HISTORY_DEFAULT))
     if HISTORY_FILE.exists() and HISTORY_FILE.stat().st_size > 0:
         readline.read_history_file(str(HISTORY_FILE))
 
@@ -223,21 +256,33 @@ def main():
 
         # Save to history
         readline.add_history(line)
-        readline.write_history_file(str(HISTORY_FILE))
+        append_history(line)
 
         parts = shlex.split(line)
         cmd = parts[0].upper()
 
         # Replay shortcuts
         if cmd == "!!":
-            hist = readline.get_current_history_length()
-            if hist >= 2:
-                line = readline.get_history_item(hist - 2)
-                parts = shlex.split(line)
-                cmd = parts[0].upper()
-            else:
+            # add_history() above already appended the "!!" line itself, so it
+            # occupies the last slot and the command to repeat is the one
+            # before it. Indexing hist - 2 skipped one entry too far back,
+            # which silently re-sent an older request.
+            #
+            # A previous "!!" is skipped rather than replayed: bash expands to
+            # the last *command*, so `!!` twice runs the same command twice
+            # instead of the second one trying to expand a literal "!!".
+            previous = None
+            for i in range(readline.get_current_history_length() - 1, 0, -1):
+                candidate = readline.get_history_item(i)
+                if candidate and candidate.strip() != "!!":
+                    previous = candidate
+                    break
+            if not previous:
                 print("No previous command.")
                 continue
+            line = previous
+            parts = shlex.split(line)
+            cmd = parts[0].upper()
         elif cmd.startswith("!"):
             try:
                 n = int(cmd[1:])
