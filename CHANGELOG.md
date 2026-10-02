@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.0] - 2026-10-02
 
 ### Added
 
@@ -42,7 +42,4 @@ All notable changes to this project will be documented in this file.
   no longer silently overwrite each other: the existing request is reported and
   kept unless `save --force` is passed. The sanitizer also runs on the read
   path, so a lookup can no longer reach outside `.git-api/requests/`.
-
-## [Initial Release]
-
-- Initial project release
+  (fixes #23, #35, #36, #37)
