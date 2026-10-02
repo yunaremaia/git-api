@@ -78,9 +78,20 @@ def test_resolve_url_keeps_absolute_url():
     assert cli.resolve_url("https://other.test/x", env) == "https://other.test/x"
 
 
-def test_resolve_url_keeps_root_relative_url():
+def test_resolve_url_joins_root_relative_url_onto_base():
+    """A /-prefixed URL is root-relative, not already-resolved.
+
+    Passing it through unchanged handed urllib a path with no scheme, which
+    raised ValueError and killed the REPL, so it is joined onto base_url.
+    """
     env = {"base_url": "https://api.example.com"}
-    assert cli.resolve_url("/users", env) == "/users"
+    assert cli.resolve_url("/users", env) == "https://api.example.com/users"
+
+
+def test_resolve_url_rejects_root_relative_url_without_base_url():
+    """No base_url means the root-relative URL cannot be resolved at all."""
+    with pytest.raises(ValueError, match="base_url"):
+        cli.resolve_url("/users", {})
 
 
 def test_resolve_url_joins_relative_url_onto_base():

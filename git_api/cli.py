@@ -4,6 +4,7 @@
 import json
 import pathlib
 import readline
+import re
 import shlex
 import sys
 import urllib.request
@@ -12,6 +13,16 @@ import urllib.error
 GAPI_DIR = pathlib.Path(".git-api")
 CONFIG_FILE = GAPI_DIR / "config.json"
 HISTORY_FILE = GAPI_DIR / "history.txt"
+
+# In-memory readline buffer. `history_size` from the config bounds this; it is
+# what `!!`, `!N` and `history` can reach. It is deliberately NOT the disk cap:
+# write_history_file() serialises the capped in-memory buffer, so using the
+# same number for both truncated history.txt to a moving N-line window.
+MEMORY_HISTORY_DEFAULT = 100
+
+# How many lines history.txt keeps on disk. Separate from the in-memory cap
+# because the two are different limits: recall depth and retention.
+HISTORY_FILE_MAX_LINES = 10_000
 
 
 def init():
@@ -37,6 +48,30 @@ def load_config() -> dict:
     return json.loads(CONFIG_FILE.read_text())
 
 
+def append_history(line: str) -> None:
+    """Append *line* to ``history.txt``, trimming to ``HISTORY_FILE_MAX_LINES``.
+
+    ``readline.write_history_file()`` cannot be used here: it serialises the
+    in-memory buffer, which ``set_history_length()`` has already capped, so on
+    every command it rewrote the file with only the most recent entries. The
+    buffer cap and the file cap are different limits -- recall depth versus
+    retention -- so the file is written directly.
+
+    The file is only rewritten when it grows past the cap, so the common case
+    is a single append.
+    """
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = HISTORY_FILE.read_text().splitlines() if HISTORY_FILE.exists() \
+        else []
+    existing.append(line)
+    if len(existing) > HISTORY_FILE_MAX_LINES:
+        existing = existing[-HISTORY_FILE_MAX_LINES:]
+        HISTORY_FILE.write_text("\n".join(existing) + "\n")
+    else:
+        with HISTORY_FILE.open("a") as fh:
+            fh.write(line + "\n")
+
+
 def get_env(config: dict) -> dict:
     env_name = config["active_env"]
     return config["environments"][env_name]
@@ -55,20 +90,139 @@ def resolve_url(url: str, env: dict) -> str:
     return f"{base}/{url}"
 
 
+def _interpolate(text: str, env: dict) -> str:
+    """Replace every ``{{var}}`` in *text* with the matching string in *env*.
+
+    Non-string environment entries (``base_url``'s siblings such as the
+    ``headers`` dict) are skipped: only strings are substitution values.
+    """
+    for key, value in env.items():
+        if isinstance(value, str):
+            text = text.replace(f"{{{{{key}}}}}", value)
+    return text
+
+
+def _interpolate_headers(headers: dict, env: dict) -> dict:
+    """Return *headers* with every value passed through ``_interpolate``."""
+    return {k: _interpolate(str(v), env) for k, v in headers.items()}
+
+
+def _unresolved_placeholders(text: str, env: dict) -> list[str]:
+    """Names of ``{{var}}`` placeholders in *text* that *env* cannot resolve.
+
+    Reporting them turns an opaque 401 into an actionable message: the request
+    was about to be sent with the placeholder still in it.
+    """
+    found = re.findall(r"\{\{\s*([^{}]+?)\s*\}\}", text)
+    seen: list[str] = []
+    for name in found:
+        name = name.strip()
+        if name and name not in seen and not isinstance(env.get(name), str):
+            seen.append(name)
+    return seen
+
+
+def _warn_unresolved(text: str, env: dict, where: str) -> None:
+    """Warn about placeholders left in *text* after substitution."""
+    missing = _unresolved_placeholders(text, env)
+    if missing:
+        print(f"⚠️  Unresolved variable(s) in {where}: "
+              + ", ".join(f"{{{{{n}}}}}" for n in missing))
+
+
+def build_request_parts(parts: list[str], env: dict):
+    """Build ``(url, headers, body)`` from a parsed request line.
+
+    Substitution happens in all three places -- the help text promises URLs,
+    headers and bodies -- and the body guard is hoisted out so an empty-string
+    body is treated the same as any other.
+    """
+    url = resolve_url(parts[1], env)
+    raw_body = parts[2] if len(parts) > 2 else None
+    body = _interpolate(raw_body, env) if raw_body is not None else None
+    headers = _interpolate_headers(env.get("headers", {}), env)
+    url = _interpolate(url, env)
+    _warn_unresolved(url, env, "URL")
+    for name, value in headers.items():
+        _warn_unresolved(value, env, f"header {name}")
+    if body is not None:
+        _warn_unresolved(body, env, "body")
+    return url, headers, body
+
+
+def safe_name(name: str) -> str:
+    """Map a user-supplied request name to its on-disk filename stem.
+
+    This is the single canonical mapping used by ``save``, ``replay``, ``curl``
+    and ``list``. It must be idempotent: a lookup runs the name through it
+    again, so sanitizing an already-sanitized name has to be a no-op. That also
+    keeps ``../`` out of the path on the read side, which the write side alone
+    did not protect.
+    """
+    # Keep alphanumeric, dash, underscore; replace everything else with _
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    # Ensure the filename is not empty and not just dots/underscores
+    if not safe or safe.strip("._") == "":
+        safe = "request_" + "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in name
+        )
+    # Limit length to avoid filesystem issues
+    if len(safe) > 200:
+        safe = safe[:200]
+    return safe
+
+
+def request_path(name: str) -> pathlib.Path:
+    """Return the path a request saved as *name* lives at.
+
+    The name is sanitized on the way in, not only on the way out, so a lookup
+    can never miss a file ``save`` just wrote -- and can never reach outside
+    ``.git-api/requests/``.
+    """
+    return GAPI_DIR / "requests" / f"{safe_name(name)}.json"
+
+
+def _existing_name(path: pathlib.Path) -> str | None:
+    """Return the name a saved request was stored under, if the file is ours.
+
+    ``save_request()`` records the unsanitized name in the JSON, so a
+    collision report can name the request that actually owns the file rather
+    than only echoing the sanitized stem.
+    """
+    try:
+        return json.loads(path.read_text()).get("name")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def save_request(name: str, method: str, url: str, headers: dict,
                  body: str | None, response_status: int,
-                 response_headers: dict, response_body: str):
-    """Persist request + response as a clean JSON file."""
+                 response_headers: dict, response_body: str,
+                 overwrite: bool = False):
+    """Persist request + response as a clean JSON file.
+
+    Two distinct names can sanitize to the same filename (``foo bar`` and
+    ``foo/bar`` both become ``foo_bar.json``), and the write is not exclusive,
+    so an unguarded second save silently destroys the first request. Unless
+    ``overwrite`` is set, an existing file owned by a *different* name is
+    reported and left alone. Re-saving under the same name is an update, not a
+    collision, and always goes through.
+    """
     req_dir = GAPI_DIR / "requests"
     req_dir.mkdir(parents=True, exist_ok=True)
-    # Sanitize filename: keep alphanumeric, dash, underscore; replace others with _
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    # Ensure the filename is not empty and not just dots/underscores
-    if not safe_name or safe_name.strip("._") == "":
-        safe_name = "request_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    # Limit length to avoid filesystem issues
-    if len(safe_name) > 200:
-        safe_name = safe_name[:200]
+    path = req_dir / f"{safe_name(name)}.json"
+
+    if path.exists() and not overwrite:
+        existing = _existing_name(path)
+        if existing is not None and existing != name:
+            print(f"\n⚠️  A saved request named {existing!r} already exists at "
+                  f".git-api/requests/{path.name}.")
+            print(f"    {name!r} sanitizes to the same filename, so saving it "
+                  f"would replace that request.")
+            print(f"    Use 'save {name} --force' to replace it, or pick "
+                  f"another name.")
+            return path
+
     out = {
         "name": name,
         "request": {
@@ -83,9 +237,8 @@ def save_request(name: str, method: str, url: str, headers: dict,
             "body": response_body,
         },
     }
-    path = req_dir / f"{safe_name}.json"
     path.write_text(json.dumps(out, indent=2, default=str))
-    print(f"\n💾  Saved to .git-api/requests/{safe_name}.json")
+    print(f"\n💾  Saved to .git-api/requests/{safe_name(name)}.json")
     return path
 
 
@@ -100,7 +253,8 @@ Git-API REPL — commands:
 
   env [name]          Show / switch active environment
   var KEY=VALUE       Set variable in active environment
-  save NAME           Save last request as NAME
+  save NAME [--force] Save last request as NAME (--force replaces a
+                      colliding name instead of refusing)
   list                List saved requests
   history             Show request history
   replay NAME         Replay a saved request
@@ -110,6 +264,10 @@ Git-API REPL — commands:
 
 Variables: {{var_name}} in URLs/headers/body are substituted.
 Shortcuts: !<N> repeats history entry N, !! repeats last request.
+
+Request names are stored filesystem-safely: "my request" is saved as
+my_request.json and resolves under either spelling. Two different names that
+sanitize to the same filename are refused unless you pass --force.
 """)
 
 
@@ -140,7 +298,11 @@ def main():
     print("🌿  Git-API REPL 0.1.0")
     print("    Type 'help' for commands, 'quit' to exit.\n")
 
-    readline.set_history_length(config.get("history_size", 100))
+    # `history_size` bounds the in-memory buffer only. It is not the disk cap:
+    # write_history_file() serialises the capped buffer, so using it for both
+    # rewrote history.txt with only the last N commands, on every command.
+    readline.set_history_length(config.get("history_size",
+                                          MEMORY_HISTORY_DEFAULT))
     if HISTORY_FILE.exists() and HISTORY_FILE.stat().st_size > 0:
         readline.read_history_file(str(HISTORY_FILE))
 
@@ -157,21 +319,33 @@ def main():
 
         # Save to history
         readline.add_history(line)
-        readline.write_history_file(str(HISTORY_FILE))
+        append_history(line)
 
         parts = shlex.split(line)
         cmd = parts[0].upper()
 
         # Replay shortcuts
         if cmd == "!!":
-            hist = readline.get_current_history_length()
-            if hist >= 2:
-                line = readline.get_history_item(hist - 2)
-                parts = shlex.split(line)
-                cmd = parts[0].upper()
-            else:
+            # add_history() above already appended the "!!" line itself, so it
+            # occupies the last slot and the command to repeat is the one
+            # before it. Indexing hist - 2 skipped one entry too far back,
+            # which silently re-sent an older request.
+            #
+            # A previous "!!" is skipped rather than replayed: bash expands to
+            # the last *command*, so `!!` twice runs the same command twice
+            # instead of the second one trying to expand a literal "!!".
+            previous = None
+            for i in range(readline.get_current_history_length() - 1, 0, -1):
+                candidate = readline.get_history_item(i)
+                if candidate and candidate.strip() != "!!":
+                    previous = candidate
+                    break
+            if not previous:
                 print("No previous command.")
                 continue
+            line = previous
+            parts = shlex.split(line)
+            cmd = parts[0].upper()
         elif cmd.startswith("!"):
             try:
                 n = int(cmd[1:])
@@ -243,20 +417,22 @@ def main():
             if len(parts) < 2:
                 print("Usage: replay NAME")
                 continue
-            name = parts[1]
-            req_file = GAPI_DIR / "requests" / f"{name}.json"
+            # A saved name can contain spaces, so the whole argument is the name.
+            name = " ".join(parts[1:])
+            req_file = request_path(name)
             if not req_file.exists():
                 print(f"No saved request: {name}")
                 continue
             data = json.loads(req_file.read_text())
             req = data["request"]
-            url = resolve_url(req["url"], env)
-            for k, v in env.items():
-                if isinstance(v, str):
-                    url = url.replace(f"{{{{{k}}}}}", v)
+            url = resolve_url(_interpolate(req["url"], env), env)
+            headers = _interpolate_headers(req.get("headers", {}), env)
+            _warn_unresolved(url, env, "URL")
+            for hname, hvalue in headers.items():
+                _warn_unresolved(hvalue, env, f"header {hname}")
             print(f"\n↻  {req['method']} {url}")
             status, hdrs, body = execute_request(req["method"], url,
-                                                 req.get("headers", {}),
+                                                 headers,
                                                  req.get("body"))
             print(f"←  {status}")
             try:
@@ -268,8 +444,8 @@ def main():
             if len(parts) < 2:
                 print("Usage: curl NAME")
                 continue
-            name = parts[1]
-            req_file = GAPI_DIR / "requests" / f"{name}.json"
+            name = " ".join(parts[1:])
+            req_file = request_path(name)
             if not req_file.exists():
                 print(f"No saved request: {name}")
                 continue
@@ -284,29 +460,32 @@ def main():
             print(" \\\n   ".join(parts_curl))
         elif cmd == "SAVE":
             if len(parts) < 2:
-                print("Usage: save NAME")
+                print("Usage: save NAME [--force]")
                 continue
+            # --force is opt-in: two different names can sanitize to the same
+            # file, and replacing the one already there needs to be a decision.
+            force = False
+            args = [p for p in parts[1:] if p not in ("--force", "-f")]
+            if len(args) != len(parts) - 1:
+                force = True
+                if not args:
+                    print("Usage: save NAME [--force]")
+                    continue
             if last_request is None:
                 print("No request to save. Run a GET/POST/etc first.")
                 continue
-            name = parts[1]
+            # A name may contain spaces: everything up to the flag is the name.
+            name = " ".join(args)
             method, url, headers, body, status, resp_hdrs, resp_body = last_request
             save_request(name, method, url, headers, body, status,
-                         resp_hdrs, resp_body.decode(errors="replace") if isinstance(resp_body, bytes) else resp_body)
+                         resp_hdrs, resp_body.decode(errors="replace") if isinstance(resp_body, bytes) else resp_body,
+                         overwrite=force)
         elif cmd in ("GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"):
             if len(parts) < 2:
                 print(f"Usage: {cmd} <url> [body]")
                 continue
             url_raw = parts[1]
-            body = parts[2] if len(parts) > 2 else None
-            url = resolve_url(url_raw, env)
-            # variable substitution
-            for k, v in env.items():
-                if isinstance(v, str):
-                    url = url.replace(f"{{{{{k}}}}}", v)
-                    if body:
-                        body = body.replace(f"{{{{{k}}}}}", v)
-            headers = env.get("headers", {})
+            url, headers, body = build_request_parts(parts, env)
             print(f"\n→  {cmd} {url}")
             status, hdrs, resp_body = execute_request(cmd, url, headers, body)
             print(f"←  {status}")
