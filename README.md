@@ -19,6 +19,11 @@ Postman stores data in proprietary blobs. curl doesn't persist. Bruno is closer 
 pip install git+https://github.com/yunaremaia/git-api.git
 ```
 
+> **Not yet on PyPI.** Install from git with the line above. The command you run
+> is `git-api`; the distribution name on PyPI is `git-api-py`. The short
+> `git-api` name on PyPI belongs to an unrelated project by another author, so
+> it is not used here and never will be.
+
 ## Usage
 
 ```bash
