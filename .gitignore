@@ -1,3 +1,7 @@
 .git-api/
 __pycache__/
 *.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
