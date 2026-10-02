@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from setuptools import setup, find_packages
+
+README = Path(__file__).parent / "README.md"
 
 setup(
     # The PyPI name `git-api` belongs to JBYT27/Git-API, an unrelated project.
@@ -14,4 +18,6 @@ setup(
     },
     python_requires=">=3.11",
     description="Git-native API REPL - persist requests as JSON in your repo",
+    long_description=README.read_text(encoding="utf-8"),
+    long_description_content_type="text/markdown",
 )
