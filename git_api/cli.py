@@ -43,9 +43,15 @@ def get_env(config: dict) -> dict:
 
 
 def resolve_url(url: str, env: dict) -> str:
-    if url.startswith(("http://", "https://", "/")):
-        return url
     base = env.get("base_url", "").rstrip("/")
+    if url.startswith(("http://", "https://")):
+        return url
+    if url.startswith("/"):
+        if not base:
+            raise ValueError(
+                f"relative URL {url!r} requires base_url to be set in the active environment"
+            )
+        return f"{base}{url}"
     return f"{base}/{url}"
 
 
@@ -113,6 +119,8 @@ def execute_request(method: str, url: str, headers: dict,
         return e.code, dict(e.headers), e.read()
     except urllib.error.URLError as e:
         return 0, {}, str(e.reason).encode()
+    except ValueError as e:
+        return 0, {}, str(e).encode()
 
 
 def main():
