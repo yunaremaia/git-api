@@ -150,20 +150,79 @@ def build_request_parts(parts: list[str], env: dict):
     return url, headers, body
 
 
+def safe_name(name: str) -> str:
+    """Map a user-supplied request name to its on-disk filename stem.
+
+    This is the single canonical mapping used by ``save``, ``replay``, ``curl``
+    and ``list``. It must be idempotent: a lookup runs the name through it
+    again, so sanitizing an already-sanitized name has to be a no-op. That also
+    keeps ``../`` out of the path on the read side, which the write side alone
+    did not protect.
+    """
+    # Keep alphanumeric, dash, underscore; replace everything else with _
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    # Ensure the filename is not empty and not just dots/underscores
+    if not safe or safe.strip("._") == "":
+        safe = "request_" + "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in name
+        )
+    # Limit length to avoid filesystem issues
+    if len(safe) > 200:
+        safe = safe[:200]
+    return safe
+
+
+def request_path(name: str) -> pathlib.Path:
+    """Return the path a request saved as *name* lives at.
+
+    The name is sanitized on the way in, not only on the way out, so a lookup
+    can never miss a file ``save`` just wrote -- and can never reach outside
+    ``.git-api/requests/``.
+    """
+    return GAPI_DIR / "requests" / f"{safe_name(name)}.json"
+
+
+def _existing_name(path: pathlib.Path) -> str | None:
+    """Return the name a saved request was stored under, if the file is ours.
+
+    ``save_request()`` records the unsanitized name in the JSON, so a
+    collision report can name the request that actually owns the file rather
+    than only echoing the sanitized stem.
+    """
+    try:
+        return json.loads(path.read_text()).get("name")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def save_request(name: str, method: str, url: str, headers: dict,
                  body: str | None, response_status: int,
-                 response_headers: dict, response_body: str):
-    """Persist request + response as a clean JSON file."""
+                 response_headers: dict, response_body: str,
+                 overwrite: bool = False):
+    """Persist request + response as a clean JSON file.
+
+    Two distinct names can sanitize to the same filename (``foo bar`` and
+    ``foo/bar`` both become ``foo_bar.json``), and the write is not exclusive,
+    so an unguarded second save silently destroys the first request. Unless
+    ``overwrite`` is set, an existing file owned by a *different* name is
+    reported and left alone. Re-saving under the same name is an update, not a
+    collision, and always goes through.
+    """
     req_dir = GAPI_DIR / "requests"
     req_dir.mkdir(parents=True, exist_ok=True)
-    # Sanitize filename: keep alphanumeric, dash, underscore; replace others with _
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    # Ensure the filename is not empty and not just dots/underscores
-    if not safe_name or safe_name.strip("._") == "":
-        safe_name = "request_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    # Limit length to avoid filesystem issues
-    if len(safe_name) > 200:
-        safe_name = safe_name[:200]
+    path = req_dir / f"{safe_name(name)}.json"
+
+    if path.exists() and not overwrite:
+        existing = _existing_name(path)
+        if existing is not None and existing != name:
+            print(f"\n⚠️  A saved request named {existing!r} already exists at "
+                  f".git-api/requests/{path.name}.")
+            print(f"    {name!r} sanitizes to the same filename, so saving it "
+                  f"would replace that request.")
+            print(f"    Use 'save {name} --force' to replace it, or pick "
+                  f"another name.")
+            return path
+
     out = {
         "name": name,
         "request": {
@@ -178,9 +237,8 @@ def save_request(name: str, method: str, url: str, headers: dict,
             "body": response_body,
         },
     }
-    path = req_dir / f"{safe_name}.json"
     path.write_text(json.dumps(out, indent=2, default=str))
-    print(f"\n💾  Saved to .git-api/requests/{safe_name}.json")
+    print(f"\n💾  Saved to .git-api/requests/{safe_name(name)}.json")
     return path
 
 
@@ -195,7 +253,8 @@ Git-API REPL — commands:
 
   env [name]          Show / switch active environment
   var KEY=VALUE       Set variable in active environment
-  save NAME           Save last request as NAME
+  save NAME [--force] Save last request as NAME (--force replaces a
+                      colliding name instead of refusing)
   list                List saved requests
   history             Show request history
   replay NAME         Replay a saved request
@@ -205,6 +264,10 @@ Git-API REPL — commands:
 
 Variables: {{var_name}} in URLs/headers/body are substituted.
 Shortcuts: !<N> repeats history entry N, !! repeats last request.
+
+Request names are stored filesystem-safely: "my request" is saved as
+my_request.json and resolves under either spelling. Two different names that
+sanitize to the same filename are refused unless you pass --force.
 """)
 
 
@@ -354,8 +417,9 @@ def main():
             if len(parts) < 2:
                 print("Usage: replay NAME")
                 continue
-            name = parts[1]
-            req_file = GAPI_DIR / "requests" / f"{name}.json"
+            # A saved name can contain spaces, so the whole argument is the name.
+            name = " ".join(parts[1:])
+            req_file = request_path(name)
             if not req_file.exists():
                 print(f"No saved request: {name}")
                 continue
@@ -380,8 +444,8 @@ def main():
             if len(parts) < 2:
                 print("Usage: curl NAME")
                 continue
-            name = parts[1]
-            req_file = GAPI_DIR / "requests" / f"{name}.json"
+            name = " ".join(parts[1:])
+            req_file = request_path(name)
             if not req_file.exists():
                 print(f"No saved request: {name}")
                 continue
@@ -396,15 +460,26 @@ def main():
             print(" \\\n   ".join(parts_curl))
         elif cmd == "SAVE":
             if len(parts) < 2:
-                print("Usage: save NAME")
+                print("Usage: save NAME [--force]")
                 continue
+            # --force is opt-in: two different names can sanitize to the same
+            # file, and replacing the one already there needs to be a decision.
+            force = False
+            args = [p for p in parts[1:] if p not in ("--force", "-f")]
+            if len(args) != len(parts) - 1:
+                force = True
+                if not args:
+                    print("Usage: save NAME [--force]")
+                    continue
             if last_request is None:
                 print("No request to save. Run a GET/POST/etc first.")
                 continue
-            name = parts[1]
+            # A name may contain spaces: everything up to the flag is the name.
+            name = " ".join(args)
             method, url, headers, body, status, resp_hdrs, resp_body = last_request
             save_request(name, method, url, headers, body, status,
-                         resp_hdrs, resp_body.decode(errors="replace") if isinstance(resp_body, bytes) else resp_body)
+                         resp_hdrs, resp_body.decode(errors="replace") if isinstance(resp_body, bytes) else resp_body,
+                         overwrite=force)
         elif cmd in ("GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"):
             if len(parts) < 2:
                 print(f"Usage: {cmd} <url> [body]")
