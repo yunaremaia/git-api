@@ -4,6 +4,7 @@
 import json
 import pathlib
 import readline
+import re
 import shlex
 import sys
 import urllib.request
@@ -12,6 +13,11 @@ import urllib.error
 GAPI_DIR = pathlib.Path(".git-api")
 CONFIG_FILE = GAPI_DIR / "config.json"
 HISTORY_FILE = GAPI_DIR / "history.txt"
+
+# In-memory readline buffer size. Deliberately far larger than `history_size`:
+# set_history_length() caps what write_history_file() serialises, so using the
+# same number for both would truncate history.txt to a moving window.
+MEMORY_HISTORY_SIZE = 10_000
 
 
 def init():
@@ -53,6 +59,66 @@ def resolve_url(url: str, env: dict) -> str:
             )
         return f"{base}{url}"
     return f"{base}/{url}"
+
+
+def _interpolate(text: str, env: dict) -> str:
+    """Replace every ``{{var}}`` in *text* with the matching string in *env*.
+
+    Non-string environment entries (``base_url``'s siblings such as the
+    ``headers`` dict) are skipped: only strings are substitution values.
+    """
+    for key, value in env.items():
+        if isinstance(value, str):
+            text = text.replace(f"{{{{{key}}}}}", value)
+    return text
+
+
+def _interpolate_headers(headers: dict, env: dict) -> dict:
+    """Return *headers* with every value passed through ``_interpolate``."""
+    return {k: _interpolate(str(v), env) for k, v in headers.items()}
+
+
+def _unresolved_placeholders(text: str, env: dict) -> list[str]:
+    """Names of ``{{var}}`` placeholders in *text* that *env* cannot resolve.
+
+    Reporting them turns an opaque 401 into an actionable message: the request
+    was about to be sent with the placeholder still in it.
+    """
+    found = re.findall(r"\{\{\s*([^{}]+?)\s*\}\}", text)
+    seen: list[str] = []
+    for name in found:
+        name = name.strip()
+        if name and name not in seen and not isinstance(env.get(name), str):
+            seen.append(name)
+    return seen
+
+
+def _warn_unresolved(text: str, env: dict, where: str) -> None:
+    """Warn about placeholders left in *text* after substitution."""
+    missing = _unresolved_placeholders(text, env)
+    if missing:
+        print(f"⚠️  Unresolved variable(s) in {where}: "
+              + ", ".join(f"{{{{{n}}}}}" for n in missing))
+
+
+def build_request_parts(parts: list[str], env: dict):
+    """Build ``(url, headers, body)`` from a parsed request line.
+
+    Substitution happens in all three places -- the help text promises URLs,
+    headers and bodies -- and the body guard is hoisted out so an empty-string
+    body is treated the same as any other.
+    """
+    url = resolve_url(parts[1], env)
+    raw_body = parts[2] if len(parts) > 2 else None
+    body = _interpolate(raw_body, env) if raw_body is not None else None
+    headers = _interpolate_headers(env.get("headers", {}), env)
+    url = _interpolate(url, env)
+    _warn_unresolved(url, env, "URL")
+    for name, value in headers.items():
+        _warn_unresolved(value, env, f"header {name}")
+    if body is not None:
+        _warn_unresolved(body, env, "body")
+    return url, headers, body
 
 
 def save_request(name: str, method: str, url: str, headers: dict,
@@ -250,13 +316,14 @@ def main():
                 continue
             data = json.loads(req_file.read_text())
             req = data["request"]
-            url = resolve_url(req["url"], env)
-            for k, v in env.items():
-                if isinstance(v, str):
-                    url = url.replace(f"{{{{{k}}}}}", v)
+            url = resolve_url(_interpolate(req["url"], env), env)
+            headers = _interpolate_headers(req.get("headers", {}), env)
+            _warn_unresolved(url, env, "URL")
+            for hname, hvalue in headers.items():
+                _warn_unresolved(hvalue, env, f"header {hname}")
             print(f"\n↻  {req['method']} {url}")
             status, hdrs, body = execute_request(req["method"], url,
-                                                 req.get("headers", {}),
+                                                 headers,
                                                  req.get("body"))
             print(f"←  {status}")
             try:
@@ -298,15 +365,7 @@ def main():
                 print(f"Usage: {cmd} <url> [body]")
                 continue
             url_raw = parts[1]
-            body = parts[2] if len(parts) > 2 else None
-            url = resolve_url(url_raw, env)
-            # variable substitution
-            for k, v in env.items():
-                if isinstance(v, str):
-                    url = url.replace(f"{{{{{k}}}}}", v)
-                    if body:
-                        body = body.replace(f"{{{{{k}}}}}", v)
-            headers = env.get("headers", {})
+            url, headers, body = build_request_parts(parts, env)
             print(f"\n→  {cmd} {url}")
             status, hdrs, resp_body = execute_request(cmd, url, headers, body)
             print(f"←  {status}")
