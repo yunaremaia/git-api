@@ -1,6 +1,5 @@
 """Tests for git-api save_request function."""
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 from git_api.cli import save_request
