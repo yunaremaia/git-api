@@ -1,0 +1,26 @@
+# Lint configuration lives here rather than in pyproject.toml because this project
+# is setup.py-only; a dedicated ruff.toml is the single native config file ruff
+# reads, so no TOML file had to be introduced just to carry tool settings.
+
+target-version = "py311"  # matches python_requires=">=3.11" in setup.py
+line-length = 100
+
+[lint]
+# Pinned explicitly: ruff's implicit default set changes between releases, and a
+# CI gate that can redden on a ruff upgrade is not a gate anyone trusts.
+select = [
+    "E4",  # import-related pycodestyle errors
+    "E7",  # statement-related pycodestyle errors
+    "E9",  # runtime/syntax pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+# E501 (line length) is deliberately not enforced: the codebase predates any
+# line-length convention, and ruff format is not part of this gate.
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Tests legitimately build unused-looking names to exercise a code path.
+"tests/*" = ["B011"]

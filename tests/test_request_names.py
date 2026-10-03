@@ -185,7 +185,9 @@ def test_saving_a_colliding_name_does_not_overwrite(capsys):
 
 def test_save_reports_the_existing_request_instead_of_pretending(capsys):
     _seed("my call")
-    out_before = capsys.readouterr().out
+    # The result is deliberately discarded: this call drains the buffer so the
+    # next readouterr() sees only what save_request itself printed.
+    capsys.readouterr()
     path = cli.save_request("my/call", "get", "https://api.example.com/x", {},
                             None, 200, {}, "ok")
     out = capsys.readouterr().out

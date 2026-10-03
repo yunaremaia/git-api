@@ -3,12 +3,11 @@
 
 import json
 import pathlib
-import readline
 import re
+import readline
 import shlex
-import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 GAPI_DIR = pathlib.Path(".git-api")
 CONFIG_FILE = GAPI_DIR / "config.json"

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 README = Path(__file__).parent / "README.md"
 
@@ -20,4 +20,12 @@ setup(
     description="Git-native API REPL - persist requests as JSON in your repo",
     long_description=README.read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
+    extras_require={
+        # CI installs `-e ".[dev]"`, so the lint/test tool versions are declared
+        # here instead of being hardcoded in .github/workflows/ci.yml.
+        "dev": [
+            "pytest>=8.0",
+            "ruff>=0.14.0",
+        ],
+    },
 )
