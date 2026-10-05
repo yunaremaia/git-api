@@ -167,6 +167,16 @@ def test_get_env_returns_active_environment():
     # environments not a dict
     (json.dumps({"environments": "not-a-dict", "active_env": "default"}),
      "active_env='default' is not in environments"),
+    # active_env unhashable: `active not in envs` would raise TypeError
+    (json.dumps({"environments": {"a": {}}, "active_env": ["a"]}),
+     "active_env=['a'] is not in environments"),
+    (json.dumps({"environments": {"a": {}}, "active_env": {"a": 1}}),
+     "active_env={'a': 1} is not in environments"),
+    # environment entry not a dict: used to crash mid-session in resolve_url()
+    (json.dumps({"environments": {"prod": "nope"}, "active_env": "prod"}),
+     "environments.prod must be an object, got str"),
+    (json.dumps({"environments": {"prod": 7}, "active_env": "prod"}),
+     "environments.prod must be an object, got int"),
     # history_size wrong type
     (json.dumps({"environments": {"default": {}}, "active_env": "default",
                  "history_size": "ten"}),
