@@ -43,8 +43,34 @@ def init():
         HISTORY_FILE.write_text("")
 
 
+REQUIRED_CONFIG_KEYS = ("environments", "active_env")
+
+
 def load_config() -> dict:
-    return json.loads(CONFIG_FILE.read_text())
+    """Load config.json, or explain precisely why it cannot be used.
+
+    The file is hand-editable and committed to git, so a malformed one is an
+    expected state. Failing with a traceback here strands the user with no way
+    to reach `help`; naming the offending field lets them fix it in one edit.
+    """
+    try:
+        config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{CONFIG_FILE}: invalid JSON ({e}). Fix or delete it.")
+    if not isinstance(config, dict):
+        raise SystemExit(f"{CONFIG_FILE}: expected a JSON object, got {type(config).__name__}.")
+    for key in REQUIRED_CONFIG_KEYS:
+        if key not in config:
+            raise SystemExit(f"{CONFIG_FILE}: missing required key {key!r}.")
+    envs = config["environments"]
+    active = config["active_env"]
+    if not isinstance(envs, dict) or active not in envs:
+        raise SystemExit(
+            f"{CONFIG_FILE}: active_env={active!r} is not in "
+            f"environments ({list(envs) if isinstance(envs, dict) else envs}).")
+    if "history_size" in config and not isinstance(config["history_size"], int):
+        raise SystemExit(f"{CONFIG_FILE}: history_size must be an integer.")
+    return config
 
 
 def append_history(line: str) -> None:
@@ -101,8 +127,13 @@ def _interpolate(text: str, env: dict) -> str:
     return text
 
 
-def _interpolate_headers(headers: dict, env: dict) -> dict:
+def _interpolate_headers(headers, env: dict) -> dict:
     """Return *headers* with every value passed through ``_interpolate``."""
+    if not isinstance(headers, dict):
+        raise SystemExit(
+            f"{CONFIG_FILE}: environments.<active>.headers must be "
+            f"an object, got {type(headers).__name__}."
+        )
     return {k: _interpolate(str(v), env) for k, v in headers.items()}
 
 
