@@ -154,6 +154,51 @@ def test_get_env_returns_active_environment():
     assert cli.get_env(config)["base_url"] == "https://prod.test"
 
 
+@pytest.mark.parametrize("cfg,expected_snippet", [
+    # KeyError: environments first (checked before active_env)
+    ("{}", "missing required key 'environments'"),
+    # KeyError: environments
+    (json.dumps({"active_env": "default"}), "missing required key 'environments'"),
+    # KeyError: active_env not in environments
+    (json.dumps({"environments": {}, "active_env": "prod"}), "active_env='prod' is not in environments"),
+    # active_env not a string
+    (json.dumps({"environments": {"default": {}}, "active_env": 123}),
+     "active_env=123 is not in environments"),
+    # environments not a dict
+    (json.dumps({"environments": "not-a-dict", "active_env": "default"}),
+     "active_env='default' is not in environments"),
+    # history_size wrong type
+    (json.dumps({"environments": {"default": {}}, "active_env": "default",
+                 "history_size": "ten"}),
+     "history_size must be an integer"),
+])
+def test_bad_config_reports_instead_of_crashing(cfg, expected_snippet, tmp_path, monkeypatch):
+    """Malformed config.json produces a readable SystemExit instead of a traceback."""
+    monkeypatch.chdir(tmp_path)
+    cli.GAPI_DIR.mkdir()
+    cli.CONFIG_FILE.write_text(cfg)
+    with pytest.raises(SystemExit) as exc:
+        cli.load_config()
+    assert str(cli.CONFIG_FILE) in str(exc.value)
+    assert expected_snippet in str(exc.value)
+
+
+def test_headers_string_type_error_named(tmp_path, monkeypatch):
+    """headers set to a string produces a named SystemExit."""
+    monkeypatch.chdir(tmp_path)
+    cli.init()
+    # Patch load_config to return a config where headers is a string
+    bad_config = {
+        "environments": {"default": {"base_url": "", "headers": "Authorization: Bearer tok"}},
+        "active_env": "default",
+    }
+    monkeypatch.setattr(cli, "load_config", lambda: bad_config)
+    with pytest.raises(SystemExit) as exc:
+        cli._interpolate_headers(bad_config["environments"]["default"]["headers"], {})
+    assert ".git-api/config.json" in str(exc.value)
+    assert "headers must be an object" in str(exc.value)
+
+
 # --- save_request -----------------------------------------------------------
 
 
