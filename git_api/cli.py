@@ -56,7 +56,7 @@ def load_config() -> dict:
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        raise SystemExit(f"{CONFIG_FILE}: invalid JSON ({e}). Fix or delete it.")
+        raise SystemExit(f"{CONFIG_FILE}: invalid JSON ({e}). Fix or delete it.") from e
     if not isinstance(config, dict):
         raise SystemExit(f"{CONFIG_FILE}: expected a JSON object, got {type(config).__name__}.")
     for key in REQUIRED_CONFIG_KEYS:
