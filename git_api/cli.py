@@ -6,8 +6,21 @@ import pathlib
 import re
 import readline
 import shlex
+import sys
 import urllib.error
 import urllib.request
+
+
+def _say(msg: str) -> None:
+    """Print, degrading to ASCII when stdout cannot encode the message.
+
+    A REPL that dies on its own banner because of the caller's locale is
+    unusable, and the user cannot type `quit` to get out of it.
+    """
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode(sys.stdout.encoding or "ascii", errors="replace").decode(sys.stdout.encoding or "ascii", errors="replace"))
 
 GAPI_DIR = pathlib.Path(".git-api")
 CONFIG_FILE = GAPI_DIR / "config.json"
@@ -125,7 +138,7 @@ def _warn_unresolved(text: str, env: dict, where: str) -> None:
     """Warn about placeholders left in *text* after substitution."""
     missing = _unresolved_placeholders(text, env)
     if missing:
-        print(f"⚠️  Unresolved variable(s) in {where}: "
+        _say(f"⚠️  Unresolved variable(s) in {where}: "
               + ", ".join(f"{{{{{n}}}}}" for n in missing))
 
 
@@ -214,7 +227,7 @@ def save_request(name: str, method: str, url: str, headers: dict,
     if path.exists() and not overwrite:
         existing = _existing_name(path)
         if existing is not None and existing != name:
-            print(f"\n⚠️  A saved request named {existing!r} already exists at "
+            _say(f"\n⚠️  A saved request named {existing!r} already exists at "
                   f".git-api/requests/{path.name}.")
             print(f"    {name!r} sanitizes to the same filename, so saving it "
                   f"would replace that request.")
@@ -237,7 +250,7 @@ def save_request(name: str, method: str, url: str, headers: dict,
         },
     }
     path.write_text(json.dumps(out, indent=2, default=str))
-    print(f"\n💾  Saved to .git-api/requests/{safe_name(name)}.json")
+    _say(f"\n💾  Saved to .git-api/requests/{safe_name(name)}.json")
     return path
 
 
@@ -294,7 +307,7 @@ def main():
     env = get_env(config)
     last_request = None
 
-    print("🌿  Git-API REPL 0.1.0")
+    _say("🌿  Git-API REPL 0.1.0")
     print("    Type 'help' for commands, 'quit' to exit.\n")
 
     # `history_size` bounds the in-memory buffer only. It is not the disk cap:
@@ -429,7 +442,7 @@ def main():
             _warn_unresolved(url, env, "URL")
             for hname, hvalue in headers.items():
                 _warn_unresolved(hvalue, env, f"header {hname}")
-            print(f"\n↻  {req['method']} {url}")
+            _say(f"\n↻  {req['method']} {url}")
             status, hdrs, body = execute_request(req["method"], url,
                                                  headers,
                                                  req.get("body"))
@@ -485,7 +498,7 @@ def main():
                 continue
             url_raw = parts[1]
             url, headers, body = build_request_parts(parts, env)
-            print(f"\n→  {cmd} {url}")
+            _say(f"\n→  {cmd} {url}")
             status, hdrs, resp_body = execute_request(cmd, url, headers, body)
             print(f"←  {status}")
             try:
