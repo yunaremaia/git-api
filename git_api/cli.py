@@ -64,10 +64,15 @@ def load_config() -> dict:
             raise SystemExit(f"{CONFIG_FILE}: missing required key {key!r}.")
     envs = config["environments"]
     active = config["active_env"]
-    if not isinstance(envs, dict) or active not in envs:
+    if not isinstance(envs, dict) or not isinstance(active, str) or active not in envs:
         raise SystemExit(
             f"{CONFIG_FILE}: active_env={active!r} is not in "
             f"environments ({list(envs) if isinstance(envs, dict) else envs}).")
+    for name, entry in envs.items():
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"{CONFIG_FILE}: environments.{name} must be an object, "
+                f"got {type(entry).__name__}.")
     if "history_size" in config and not isinstance(config["history_size"], int):
         raise SystemExit(f"{CONFIG_FILE}: history_size must be an integer.")
     return config
