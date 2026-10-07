@@ -8,6 +8,7 @@ directory.
 
 import io
 import json
+import sys
 import urllib.error
 from unittest.mock import patch
 
@@ -598,3 +599,22 @@ def test_repl_bang_non_numeric_is_unknown_command(capsys, monkeypatch):
 def test_repl_eof_exits_cleanly(capsys, monkeypatch):
     _run_repl([], monkeypatch)
     assert "Bye." in capsys.readouterr().out
+
+def test_repl_survives_ascii_stdout(tmp_path, monkeypatch):
+    """#53: a non-UTF-8 stdout must not kill the REPL before `quit` is read.
+
+    `main()` prints non-ASCII glyphs (the banner leaf, the `->`/`<-` status
+    lines) and `sys.stdout` decides their encoding once, at interpreter start.
+    Under `LC_ALL=C`/`PYTHONIOENCODING=ascii` the first banner print raised
+    UnicodeEncodeError, so the session died before the user could type
+    `quit` -- there was no way out of the REPL.
+    """
+    monkeypatch.chdir(tmp_path)
+    out = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("GET https://example.com\nquit\n"))
+    monkeypatch.setattr(cli, "execute_request", lambda *a, **k: (200, {}, b"{}"))
+
+    cli.main()  # must not raise
+
+    assert b"200" in out.buffer.getvalue()

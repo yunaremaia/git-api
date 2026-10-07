@@ -6,6 +6,7 @@ import pathlib
 import re
 import readline
 import shlex
+import sys
 import urllib.error
 import urllib.request
 
@@ -325,6 +326,20 @@ def execute_request(method: str, url: str, headers: dict,
 
 
 def main():
+    # The REPL's own banners and every response-status line carry non-ASCII
+    # glyphs. Under a non-UTF-8 locale (LC_ALL=C, PYTHONIOENCODING=ascii) the
+    # first such print() raised UnicodeEncodeError and killed the session
+    # before the user could type `quit`. Set the stream's error policy once,
+    # at REPL start, so a glyph that the active encoding cannot represent
+    # degrades to "?" instead of ending the session. This also covers text
+    # that arrives from a response body or a `?`-param, which no per-call-site
+    # guard could promise.
+    #
+    # `sys.stdout` is only *usually* a TextIOWrapper (it can be replaced, or be
+    # None under a windowed interpreter), so the policy is applied only when
+    # the stream supports it.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     init()
     config = load_config()
     env = get_env(config)
