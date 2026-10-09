@@ -1,8 +1,6 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -20,3 +18,4 @@ jobs:
       - run: pip install build twine
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+
